@@ -1,3 +1,13 @@
+# Infer imagenet with torchvision
+#
+# Usage:
+#
+# python quantize_mobilenet_v3.py path/to/imagenet mobilenetv3.mobilenet_v3_large --device cuda --bsize=50
+#
+# python quantize_mobilenet_v3.py path/to/imagenet quantized_mobilenetv3  --bsize=50
+
+import argparse
+
 import torch
 import torch.nn as nn
 import torch.quantization
@@ -14,6 +24,15 @@ from torchvision.models.mobilenetv3 import (
 )
 from torchvision.models.quantization.utils import _replace_relu
 import torchvision.transforms as transforms
+
+
+model_names = sorted(
+    name
+    for name in torchvision.models.__dict__
+    if name.islower()
+    and not name.startswith("__")
+    and callable(torchvision.models.__dict__[name])
+)
 
 
 class QuantizableSqueezeExcitation(SqueezeExcitation):
@@ -134,18 +153,13 @@ def evaluate(model, data_loader, neval_batches, device="cpu"):
     progress = ProgressMeter(len(data_loader), [top1, top5], prefix="Test: ")
 
     model.eval()
-    print(device)
+    model.to(device)
     with torch.no_grad():
         for i, (image, target) in enumerate(data_loader):
-            if device != "cpu":
-                target = target.cuda(non_blocking=True)
-                image = image.cuda(non_blocking=True)
-            if device != str(target.device):
-                print(device, target.device)
-                raise AssertionError()
+            target = target.to(device)
+            image = image.to(device)
             output = model(image)
             acc1, acc5 = accuracy(output, target, topk=(1, 5))
-            # print(".", end="")
             top1.update(acc1[0], image.size(0))
             top5.update(acc5[0], image.size(0))
 
@@ -172,12 +186,40 @@ def load_model(model_file, arch):
 
 
 def main():
-    # arch = "mobilenet_v3_small"
-    arch = "mobilenet_v3_large"
-    data_path = "/home/val"
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--data",
+        type=str,
+        required=True,
+        help="path to validation data",
+    )
+    parser.add_argument(
+        "--arch",
+        type=str,
+        required=True,
+        choices=model_names,
+        help="model name",
+    )
+    parser.add_argument(
+        "--bsize",
+        type=int,
+        default=1,
+        help="batch size",
+    )
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="device",
+    )
+    args = parser.parse_args()
 
-    eval_batch_size = 50  # 50000 images in total
-    num_eval_batches = 1000
+    arch = args.arch
+    assert arch in ["mobilenet_v3_small", "mobilenet_v3_large"]
+    data_path = args.data
+
+    eval_batch_size = args.bsize  # 50000 images in total
+    num_eval_batches, r = divmod(50000, args.bsize)
+    assert r == 0, "barch size must be divisible."
 
     normalize = transforms.Normalize(
         mean=[0.485, 0.456, 0.406],
@@ -202,10 +244,10 @@ def main():
     )
 
     print("Float model evaluation")
-    float_model = eval("torchvision.models." + arch)(pretrained=True)
+    float_model = torchvision.models.__dict__[arch](pretrained=True)
     # float_model.load_state_dict(torch.load(float_model_file))
-    float_model.cuda()
-    top1, top5 = evaluate(float_model, val_loader, num_eval_batches, "cuda:0")
+    float_model.to(args.device)
+    top1, top5 = evaluate(float_model, val_loader, num_eval_batches, args.device)
     print(
         "Evaluation accuracy on {n} images\nAcc@1 {top1:.3f} Acc@5 {top5:.3f}".format(
             n=num_eval_batches * eval_batch_size, top1=top1, top5=top5
@@ -217,7 +259,8 @@ def main():
 
     num_calib_batches = num_eval_batches
 
-    float_model_file = "/home/onnx_pretrained_models/mobilenet_v3_large-8738ca79.pth"
+    # TODO: do not hard code the pretrained weight path
+    float_model_file = "/path/to/mobilenet_v3_large-8738ca79.pth"
     per_channel_quantized_model = load_model(float_model_file, arch)
     _replace_relu(per_channel_quantized_model)
     per_channel_quantized_model.eval()
@@ -237,7 +280,7 @@ def main():
     )
     print(
         "Evaluation accuracy on {n} images\nAcc@1 {top1:.3f} Acc@5 {top5:.3f}".format(
-            n=eval_batch_size * num_calib_batches, top1=top1, top5=top5
+            n=50000, top1=top1, top5=top5
         )
     )
 

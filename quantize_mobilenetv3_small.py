@@ -188,8 +188,8 @@ def main():
             data_path,
             transforms.Compose(
                 [
-                    # transforms.Resize(256),
-                    # transforms.CenterCrop(224),
+                    transforms.Resize(256),
+                    transforms.CenterCrop(224),
                     transforms.ToTensor(),
                     normalize,
                 ]
